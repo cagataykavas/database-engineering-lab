@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "postgres-engineering-lab"
+version = "0.2.0"
+description = "PostgreSQL workload, indexing and EXPLAIN ANALYZE benchmark toolkit"
+requires-python = ">=3.11"
+dependencies = ["psycopg[binary]>=3.2"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+db-bench = "dbbench.cli:main"
+
+[tool.setuptools]
+packages = ["dbbench"]
+
+[tool.ruff]
+line-length = 100
