@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "postgres-engineering-lab"
-version = "0.2.0"
-description = "PostgreSQL workload, indexing and EXPLAIN ANALYZE benchmark toolkit"
+version = "1.0.0"
+description = "PostgreSQL migrations, transactional ledger, durable jobs and plan regression toolkit"
 requires-python = ">=3.11"
 dependencies = ["psycopg[binary]>=3.2"]
 
@@ -16,7 +16,14 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 db-bench = "dbbench.cli:main"
 
 [tool.setuptools]
-packages = ["dbbench"]
+packages = ["dbbench", "dbbench.sql"]
+
+[tool.setuptools.package-data]
+"dbbench.sql" = ["*.sql"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"

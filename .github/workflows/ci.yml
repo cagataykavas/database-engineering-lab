@@ -28,9 +28,25 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
-      - run: ruff check dbbench tests
+      - run: ruff check .
+      - run: ruff format --check .
       - run: pytest -q
-      - name: Initialize integration database
-        run: db-bench init --seed-rows 3000
-      - name: Run benchmark smoke test
-        run: db-bench benchmark --iterations 2 --output /tmp/db-benchmark.json
+      - name: Verify migrations, ledger, leases and keyset pagination
+        run: |
+          mkdir -p evidence
+          db-bench verify --seed-rows 3000 > evidence/platform-verification.json
+          python -m json.tool evidence/platform-verification.json >/dev/null
+      - name: Run query-plan benchmark
+        run: db-bench benchmark --iterations 2 --output evidence/query-plans.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: postgres-engineering-evidence
+          path: evidence/*.json
+      - name: Build and verify wheel outside source tree
+        run: |
+          python -m pip wheel . --no-deps --wheel-dir /tmp/dist
+          python -m venv /tmp/wheelcheck
+          cd /tmp
+          /tmp/wheelcheck/bin/pip install /tmp/dist/*.whl
+          /tmp/wheelcheck/bin/python -c "from dbbench.migrations import discover_migrations; assert len(discover_migrations()) == 3"
+      - run: docker compose config --quiet
