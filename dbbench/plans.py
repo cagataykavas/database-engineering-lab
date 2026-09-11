@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,9 @@ class PlanNode:
     filter: str | None
     index_name: str | None
     depth: int
+    shared_hit_blocks: int
+    shared_read_blocks: int
+    rows_removed_by_filter: int
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,19 @@ class PlanSummary:
     def total_actual_rows(self) -> int:
         return sum(node.actual_rows or 0 for node in self.nodes)
 
+    @property
+    def shared_hit_blocks(self) -> int:
+        return self.nodes[0].shared_hit_blocks
+
+    @property
+    def shared_read_blocks(self) -> int:
+        return self.nodes[0].shared_read_blocks
+
+    @property
+    def cache_hit_ratio(self) -> float | None:
+        total = self.shared_hit_blocks + self.shared_read_blocks
+        return self.shared_hit_blocks / total if total else None
+
 
 def _walk(node: dict[str, Any], depth: int = 0) -> Iterable[PlanNode]:
     yield PlanNode(
@@ -57,6 +74,9 @@ def _walk(node: dict[str, Any], depth: int = 0) -> Iterable[PlanNode]:
         filter=node.get("Filter"),
         index_name=node.get("Index Name"),
         depth=depth,
+        shared_hit_blocks=int(node.get("Shared Hit Blocks", 0)),
+        shared_read_blocks=int(node.get("Shared Read Blocks", 0)),
+        rows_removed_by_filter=int(node.get("Rows Removed by Filter", 0)),
     )
     for child in node.get("Plans", []):
         yield from _walk(child, depth + 1)
@@ -73,12 +93,8 @@ def parse_explain_json(payload: list[dict[str, Any]] | dict[str, Any]) -> PlanSu
     if "Plan" not in root:
         raise ValueError("EXPLAIN payload has no Plan node")
     return PlanSummary(
-        planning_time_ms=(
-            float(root["Planning Time"]) if "Planning Time" in root else None
-        ),
-        execution_time_ms=(
-            float(root["Execution Time"]) if "Execution Time" in root else None
-        ),
+        planning_time_ms=(float(root["Planning Time"]) if "Planning Time" in root else None),
+        execution_time_ms=(float(root["Execution Time"]) if "Execution Time" in root else None),
         nodes=tuple(_walk(root["Plan"])),
     )
 
@@ -86,7 +102,11 @@ def parse_explain_json(payload: list[dict[str, Any]] | dict[str, Any]) -> PlanSu
 def plan_findings(summary: PlanSummary) -> list[str]:
     findings: list[str] = []
     for node in summary.nodes:
-        if node.node_type == "Seq Scan" and node.actual_rows is not None and node.actual_rows > 10000:
+        if (
+            node.node_type == "Seq Scan"
+            and node.actual_rows is not None
+            and node.actual_rows > 10000
+        ):
             relation = node.relation or "unknown_relation"
             findings.append(f"large sequential scan on {relation}: {node.actual_rows} rows")
         if (
@@ -97,6 +117,10 @@ def plan_findings(summary: PlanSummary) -> list[str]:
             findings.append(
                 f"cardinality underestimate at {node.node_type}: "
                 f"planned {node.plan_rows}, actual {node.actual_rows}"
+            )
+        if node.rows_removed_by_filter > 10000:
+            findings.append(
+                f"filter discarded {node.rows_removed_by_filter} rows at {node.node_type}"
             )
         if (
             node.actual_rows is not None
@@ -110,3 +134,32 @@ def plan_findings(summary: PlanSummary) -> list[str]:
     if summary.execution_time_ms is not None and summary.execution_time_ms > 1000:
         findings.append(f"slow execution: {summary.execution_time_ms:.1f} ms")
     return findings
+
+
+@dataclass(frozen=True, slots=True)
+class PlanBudget:
+    max_execution_ms: float
+    max_sequential_scans: int = 0
+    max_shared_read_blocks: int | None = None
+
+    def violations(self, summary: PlanSummary) -> tuple[str, ...]:
+        violations: list[str] = []
+        if (
+            summary.execution_time_ms is not None
+            and summary.execution_time_ms > self.max_execution_ms
+        ):
+            violations.append(
+                f"execution {summary.execution_time_ms:.2f}ms exceeds {self.max_execution_ms:.2f}ms"
+            )
+        if summary.sequential_scan_count > self.max_sequential_scans:
+            violations.append(
+                f"sequential scans {summary.sequential_scan_count} exceed {self.max_sequential_scans}"
+            )
+        if (
+            self.max_shared_read_blocks is not None
+            and summary.shared_read_blocks > self.max_shared_read_blocks
+        ):
+            violations.append(
+                f"shared reads {summary.shared_read_blocks} exceed {self.max_shared_read_blocks}"
+            )
+        return tuple(violations)

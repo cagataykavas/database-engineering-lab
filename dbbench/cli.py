@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
 import json
+from dataclasses import asdict
 from pathlib import Path
 
+from dbbench.migrations import MigrationRunner
+from dbbench.scenarios import print_report, verify_platform
 from dbbench.workload import (
     benchmark_query,
     connect,
-    execute_sql_file,
     seed_transactions,
     standard_workloads,
 )
@@ -31,10 +32,19 @@ def _serialize_measurement(measurement) -> dict:
 
 def command_init(args: argparse.Namespace) -> int:
     with connect(args.dsn) as connection:
-        execute_sql_file(connection, args.schema)
+        migrations = MigrationRunner(connection).apply()
         if args.seed_rows:
             seed_transactions(connection, rows=args.seed_rows, seed=args.seed)
-    print(json.dumps({"status": "initialized", "seed_rows": args.seed_rows}, indent=2))
+    print(
+        json.dumps(
+            {
+                "status": "initialized",
+                "seed_rows": args.seed_rows,
+                "migrations_applied": sum(result.applied for result in migrations),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -60,6 +70,22 @@ def command_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_migrate(args: argparse.Namespace) -> int:
+    with connect(args.dsn) as connection:
+        results = MigrationRunner(connection).apply()
+    print(json.dumps({"migrations": [asdict(result) for result in results]}, indent=2))
+    return 0
+
+
+def command_verify(args: argparse.Namespace) -> int:
+    with connect(args.dsn) as connection:
+        report = verify_platform(connection, seed_rows=args.seed_rows)
+    print_report(report)
+    if not all(report["invariants"].values()):
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="db-bench",
@@ -72,15 +98,21 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     initialize = subparsers.add_parser("init")
-    initialize.add_argument("--schema", default="sql/schema.sql")
     initialize.add_argument("--seed-rows", type=int, default=100000)
     initialize.add_argument("--seed", type=int, default=42)
     initialize.set_defaults(handler=command_init)
+
+    migrate = subparsers.add_parser("migrate")
+    migrate.set_defaults(handler=command_migrate)
 
     benchmark = subparsers.add_parser("benchmark")
     benchmark.add_argument("--iterations", type=int, default=20)
     benchmark.add_argument("--output")
     benchmark.set_defaults(handler=command_benchmark)
+
+    verify = subparsers.add_parser("verify")
+    verify.add_argument("--seed-rows", type=int, default=3000)
+    verify.set_defaults(handler=command_verify)
     return parser
 
 

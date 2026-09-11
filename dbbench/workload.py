@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
-import random
 from statistics import mean, median
-import time
-from typing import Iterable
 
 import psycopg
 from psycopg.rows import dict_row
@@ -25,8 +24,8 @@ class QueryMeasurement:
     findings: tuple[str, ...]
 
 
-def connect(dsn: str):
-    return psycopg.connect(dsn, autocommit=True, row_factory=dict_row)
+def connect(dsn: str, *, autocommit: bool = True):
+    return psycopg.connect(dsn, autocommit=autocommit, row_factory=dict_row)
 
 
 def execute_sql_file(connection, path: str | Path) -> None:
