@@ -5,6 +5,11 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
+from dbbench.connections import (
+    ConnectionPolicy,
+    collect_connection_snapshot,
+    evaluate_connection_budget,
+)
 from dbbench.migrations import MigrationRunner
 from dbbench.scenarios import print_report, verify_platform
 from dbbench.workload import (
@@ -86,6 +91,26 @@ def command_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_connections(args: argparse.Namespace) -> int:
+    policy = ConnectionPolicy(
+        pool_size_per_replica=args.pool_size_per_replica,
+        replicas=args.replicas,
+        min_free_connections=args.min_free_connections,
+        max_utilization=args.max_utilization,
+        max_idle_in_transaction=args.max_idle_in_transaction,
+        max_idle_in_transaction_seconds=args.max_idle_in_transaction_seconds,
+        max_waiting_connections=args.max_waiting_connections,
+    )
+    with connect(args.dsn) as connection:
+        snapshot = collect_connection_snapshot(connection)
+    report = evaluate_connection_budget(snapshot, policy)
+    text = json.dumps(report.to_dict(), indent=2, sort_keys=True)
+    if args.output:
+        Path(args.output).write_text(text + "\n", encoding="utf-8")
+    print(text)
+    return 0 if report.passed else 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="db-bench",
@@ -109,6 +134,24 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--iterations", type=int, default=20)
     benchmark.add_argument("--output")
     benchmark.set_defaults(handler=command_benchmark)
+
+    connections = subparsers.add_parser(
+        "connections",
+        help="Evaluate live PostgreSQL usage and configured pool capacity.",
+    )
+    connections.add_argument("--pool-size-per-replica", type=int, default=10)
+    connections.add_argument("--replicas", type=int, default=1)
+    connections.add_argument("--min-free-connections", type=int, default=5)
+    connections.add_argument("--max-utilization", type=float, default=0.8)
+    connections.add_argument("--max-idle-in-transaction", type=int, default=0)
+    connections.add_argument(
+        "--max-idle-in-transaction-seconds",
+        type=float,
+        default=60.0,
+    )
+    connections.add_argument("--max-waiting-connections", type=int, default=0)
+    connections.add_argument("--output")
+    connections.set_defaults(handler=command_connections)
 
     verify = subparsers.add_parser("verify")
     verify.add_argument("--seed-rows", type=int, default=3000)
