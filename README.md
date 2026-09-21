@@ -2,9 +2,9 @@
 
 A runnable PostgreSQL system for studying the two things a production data layer must get right: **correctness under concurrency** and **performance under evidence**.
 
-The repository implements checksum-verified migrations, an idempotent double-entry transfer ledger, deterministic row locking, a durable `SKIP LOCKED` worker queue, compound keyset pagination, synthetic workload generation and machine-readable `EXPLAIN (ANALYZE, BUFFERS)` regression reports.
+The repository implements checksum-verified migrations, an idempotent double-entry transfer ledger, deterministic row locking, a durable `SKIP LOCKED` worker queue, compound keyset pagination, synthetic workload generation, machine-readable `EXPLAIN (ANALYZE, BUFFERS)` regression reports and a live connection-capacity gate.
 
-It is deliberately more than a folder of SQL snippets. The CLI executes the complete system against PostgreSQL 16 and CI publishes the resulting ledger, lease, pagination and query-plan evidence.
+It is deliberately more than a folder of SQL snippets. The CLI executes the complete system against PostgreSQL 16 and CI publishes the resulting ledger, lease, pagination, query-plan and connection-capacity evidence.
 
 ## Architecture
 
@@ -14,10 +14,12 @@ flowchart TD
     CLI --> Ledger[Transfer service]
     CLI --> Jobs[Durable job queue]
     CLI --> Workload[Workload generator]
+    CLI --> Connections[Connection budget gate]
     Migrations --> PG[(PostgreSQL 16)]
     Ledger --> PG
     Jobs --> PG
     Workload --> PG
+    Connections --> PG
     PG --> Explain[EXPLAIN ANALYZE BUFFERS]
     Explain --> Budget[Plan parser and budgets]
     Budget --> Evidence[CI JSON artifacts]
@@ -38,6 +40,8 @@ flowchart TD
 | Poison job retries forever | Attempt budget, delayed retry and `dead_letter` state |
 | Offset pagination skips/duplicates rows | `(created_at, id)` keyset cursor |
 | Query regression goes unnoticed | Parsed execution, scan and buffer budgets |
+| App replicas exhaust PostgreSQL connections | Aggregate pool-capacity budget and reserved headroom |
+| Leaked transactions hold locks | Idle-in-transaction count and age limits |
 
 ## Versioned migrations
 
@@ -130,6 +134,26 @@ The benchmark captures PostgreSQL JSON plans recursively and records:
 
 `PlanBudget` turns expected behavior into a regression contract: maximum execution time, sequential scan count and shared disk reads. A sequential scan is not automatically condemned—on a small table it may be correct—but an unexpected scan on a known indexed workload becomes visible.
 
+## Connection-capacity gate
+
+`db-bench connections` combines deployment configuration with a live `pg_stat_activity` snapshot. It subtracts PostgreSQL's role-reserved and superuser-reserved slots, multiplies pool size by replica count and preserves an explicit free-connection reserve. It also checks current utilization, idle-in-transaction sessions and active sessions waiting on non-client events.
+
+```bash
+db-bench connections \
+  --pool-size-per-replica 15 \
+  --replicas 4 \
+  --min-free-connections 10 \
+  --max-utilization 0.80 \
+  --max-idle-in-transaction 0 \
+  --max-idle-in-transaction-seconds 60 \
+  --max-waiting-connections 0 \
+  --output connection-budget.json
+```
+
+The command emits the policy, raw snapshot, derived capacity and stable reason codes as JSON. It exits `2` on a policy violation and fails closed on inconsistent or non-finite evidence. `Client` wait events are deliberately excluded: an idle backend waiting for its client is not database lock contention.
+
+This is a point-in-time operational gate, not a capacity forecast. A production policy must include every independently scaling application, background worker and administrative client. With PgBouncer transaction pooling, compare database-side capacity with PgBouncer's server pools rather than summing client connections. `pg_stat_activity` visibility can also be restricted for non-privileged roles; alerting should pair this gate with time-series saturation, wait-event and transaction-age telemetry.
+
 ## Run the full verification
 
 ```bash
@@ -137,6 +161,7 @@ docker compose up -d postgres
 pip install -e '.[dev]'
 db-bench verify --seed-rows 3000 > platform-verification.json
 db-bench benchmark --iterations 20 --output query-plans.json
+db-bench connections --pool-size-per-replica 10 --replicas 2 --output connection-budget.json
 ```
 
 `verify` runs all of the following against a real PostgreSQL instance:
@@ -159,6 +184,7 @@ db-bench migrate
 db-bench verify --seed-rows 3000
 db-bench init --seed-rows 100000
 db-bench benchmark --iterations 20 --output benchmark.json
+db-bench connections --pool-size-per-replica 10 --replicas 2 --output connection-budget.json
 ```
 
 The default DSN is `postgresql://postgres:postgres@localhost:5432/db_lab`; every command accepts `--dsn` before its subcommand.
@@ -168,9 +194,10 @@ The default DSN is `postgresql://postgres:postgres@localhost:5432/db_lab`; every
 GitHub Actions provisions PostgreSQL 16 and runs:
 
 - Ruff lint and formatting verification;
-- unit tests for migration discovery, cursor validation and plan budgets;
+- unit tests for migration discovery, cursor validation, plan budgets and connection policies;
 - the complete transaction/lease/pagination verification;
 - the query-plan benchmark;
+- a live PostgreSQL connection-capacity snapshot and policy decision;
 - JSON artifact upload;
 - wheel build and clean-environment resource discovery;
 - Docker Compose configuration validation.
@@ -182,6 +209,7 @@ No benchmark number is hard-coded into the README. Performance depends on the ru
 ```text
 dbbench/
 ├── cli.py          command boundary
+├── connections.py  live usage and aggregate pool-capacity gate
 ├── errors.py       typed operational failures
 ├── jobs.py         SKIP LOCKED queue and leases
 ├── ledger.py       idempotent transfer and double-entry checks
@@ -198,4 +226,4 @@ docker-compose.yml   local PostgreSQL 16
 
 ## Interview surface
 
-`PostgreSQL` · `ACID` · `row locking` · `deadlock prevention` · `idempotency` · `double-entry ledger` · `advisory locks` · `schema migrations` · `SKIP LOCKED` · `leases` · `dead-letter queues` · `keyset pagination` · `EXPLAIN ANALYZE` · `buffer metrics` · `B-tree/GIN/partial indexes`
+`PostgreSQL` · `ACID` · `row locking` · `deadlock prevention` · `idempotency` · `double-entry ledger` · `advisory locks` · `schema migrations` · `SKIP LOCKED` · `leases` · `dead-letter queues` · `keyset pagination` · `EXPLAIN ANALYZE` · `buffer metrics` · `connection pooling` · `pg_stat_activity` · `B-tree/GIN/partial indexes`

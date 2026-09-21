@@ -38,6 +38,14 @@ jobs:
           python -m json.tool evidence/platform-verification.json >/dev/null
       - name: Run query-plan benchmark
         run: db-bench benchmark --iterations 2 --output evidence/query-plans.json
+      - name: Verify PostgreSQL connection budget
+        run: |
+          db-bench connections \
+            --pool-size-per-replica 10 \
+            --replicas 2 \
+            --min-free-connections 5 \
+            --output evidence/connection-budget.json
+          python -m json.tool evidence/connection-budget.json >/dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: postgres-engineering-evidence
