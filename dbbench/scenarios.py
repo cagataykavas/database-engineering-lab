@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from dbbench.errors import TransferConflict
+from dbbench.errors import LeaseConflict, TransferConflict
 from dbbench.jobs import PostgresJobQueue
 from dbbench.ledger import LedgerService, TransferRequest
 from dbbench.migrations import MigrationRunner
@@ -59,7 +59,28 @@ def verify_platform(connection, *, seed_rows: int = 3000) -> dict[str, Any]:
     )
     claimed = queue.claim("risk-scoring", "worker-a")
     second_claim = queue.claim("risk-scoring", "worker-b")
-    completed = queue.succeed(job.job_id, "worker-a")
+    if claimed is None:
+        raise RuntimeError("verification job was not claimable")
+    stale_completion_rejected = False
+    try:
+        queue.succeed(
+            job.job_id,
+            "worker-a",
+            expected_attempt=claimed.attempts + 1,
+        )
+    except LeaseConflict:
+        stale_completion_rejected = True
+    renewed = queue.renew(
+        job.job_id,
+        "worker-a",
+        expected_attempt=claimed.attempts,
+        lease_seconds=120,
+    )
+    completed = queue.succeed(
+        job.job_id,
+        "worker-a",
+        expected_attempt=renewed.attempts,
+    )
 
     seed_transactions(connection, rows=seed_rows, seed=42)
     with connection.cursor() as cursor:
@@ -113,7 +134,10 @@ def verify_platform(connection, *, seed_rows: int = 3000) -> dict[str, Any]:
         "job": {
             "job_id": str(job.job_id),
             "claimed_by": claimed.lease_owner if claimed else None,
+            "claim_attempt": claimed.attempts,
             "second_worker_claimed": second_claim is not None,
+            "stale_completion_rejected": stale_completion_rejected,
+            "lease_renewed": renewed.lease_until > claimed.lease_until,
             "final_status": completed.status,
         },
         "pagination": {
@@ -140,6 +164,8 @@ def verify_platform(connection, *, seed_rows: int = 3000) -> dict[str, Any]:
             "double_entry_balanced": ledger_report["balanced"],
             "money_conserved": ledger_report["total_account_balance"] == "1250.00",
             "job_exclusively_leased": claimed is not None and second_claim is None,
+            "stale_job_completion_rejected": stale_completion_rejected,
+            "job_lease_renewed": renewed.lease_until > claimed.lease_until,
             "job_completed": completed.status == "succeeded",
             "keyset_pages_do_not_overlap": not (page_one_ids & page_two_ids),
             "keyset_page_is_complete": len(page_one_ids) == 2 and len(page_two_ids) == 2,

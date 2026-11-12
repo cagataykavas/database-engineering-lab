@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -8,6 +9,10 @@ from uuid import UUID, uuid4
 from psycopg.types.json import Jsonb
 
 from dbbench.errors import LeaseConflict
+
+MAX_LEASE_SECONDS = 3_600
+MAX_OWNER_LENGTH = 128
+_OWNER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,8 +62,7 @@ class PostgresJobQueue:
         *,
         lease_seconds: int = 60,
     ) -> DurableJob | None:
-        if not owner or lease_seconds < 1:
-            raise ValueError("owner and positive lease duration are required")
+        self._validate_lease(owner, lease_seconds=lease_seconds)
         with self.connection.transaction(), self.connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -85,10 +89,64 @@ class PostgresJobQueue:
             row = cursor.fetchone()
             return self._job(row) if row else None
 
-    def succeed(self, job_id: UUID, owner: str) -> DurableJob:
-        return self._finish(job_id, owner, "succeeded")
+    def renew(
+        self,
+        job_id: UUID,
+        owner: str,
+        *,
+        expected_attempt: int,
+        lease_seconds: int = 60,
+    ) -> DurableJob:
+        """Renew an unexpired lease held by the expected claim attempt."""
 
-    def fail(self, job_id: UUID, owner: str, error: str) -> DurableJob:
+        self._validate_lease(
+            owner,
+            expected_attempt=expected_attempt,
+            lease_seconds=lease_seconds,
+        )
+        with self.connection.transaction(), self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE durable_jobs
+                SET lease_until = greatest(
+                        lease_until,
+                        now() + make_interval(secs => %s)
+                    ),
+                    updated_at = now()
+                WHERE job_id = %s AND leased_by = %s AND status = 'running'
+                  AND attempts = %s AND lease_until > now()
+                RETURNING *
+                """,
+                (lease_seconds, job_id, owner, expected_attempt),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise LeaseConflict("lease renewal requires the active fenced claim")
+            return self._job(row)
+
+    def succeed(
+        self,
+        job_id: UUID,
+        owner: str,
+        *,
+        expected_attempt: int,
+    ) -> DurableJob:
+        return self._finish(
+            job_id,
+            owner,
+            "succeeded",
+            expected_attempt=expected_attempt,
+        )
+
+    def fail(
+        self,
+        job_id: UUID,
+        owner: str,
+        error: str,
+        *,
+        expected_attempt: int,
+    ) -> DurableJob:
+        self._validate_lease(owner, expected_attempt=expected_attempt)
         with self.connection.transaction(), self.connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -100,30 +158,64 @@ class PostgresJobQueue:
                     END,
                     last_error = %s, leased_by = NULL, lease_until = NULL, updated_at = now()
                 WHERE job_id = %s AND leased_by = %s AND status = 'running'
+                  AND attempts = %s AND lease_until > now()
                 RETURNING *
                 """,
-                (error[:2000], job_id, owner),
+                (error[:2000], job_id, owner, expected_attempt),
             )
             row = cursor.fetchone()
             if not row:
-                raise LeaseConflict("only the active lease owner can fail a running job")
+                raise LeaseConflict("failure requires the active fenced claim")
             return self._job(row)
 
-    def _finish(self, job_id: UUID, owner: str, status: str) -> DurableJob:
+    def _finish(
+        self,
+        job_id: UUID,
+        owner: str,
+        status: str,
+        *,
+        expected_attempt: int,
+    ) -> DurableJob:
+        self._validate_lease(owner, expected_attempt=expected_attempt)
         with self.connection.transaction(), self.connection.cursor() as cursor:
             cursor.execute(
                 """
                 UPDATE durable_jobs SET status = %s, leased_by = NULL, lease_until = NULL,
                     updated_at = now()
                 WHERE job_id = %s AND leased_by = %s AND status = 'running'
+                  AND attempts = %s AND lease_until > now()
                 RETURNING *
                 """,
-                (status, job_id, owner),
+                (status, job_id, owner, expected_attempt),
             )
             row = cursor.fetchone()
             if not row:
-                raise LeaseConflict("only the active lease owner can finish a running job")
+                raise LeaseConflict("completion requires the active fenced claim")
             return self._job(row)
+
+    @staticmethod
+    def _validate_lease(
+        owner: str,
+        *,
+        expected_attempt: int | None = None,
+        lease_seconds: int | None = None,
+    ) -> None:
+        if not isinstance(owner, str) or not _OWNER_ID.fullmatch(owner):
+            raise ValueError(
+                f"owner must be a constrained identifier of at most {MAX_OWNER_LENGTH} characters"
+            )
+        if expected_attempt is not None and (
+            isinstance(expected_attempt, bool)
+            or not isinstance(expected_attempt, int)
+            or expected_attempt < 1
+        ):
+            raise ValueError("expected_attempt must be a positive integer")
+        if lease_seconds is not None and (
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, int)
+            or not 1 <= lease_seconds <= MAX_LEASE_SECONDS
+        ):
+            raise ValueError(f"lease_seconds must be in [1, {MAX_LEASE_SECONDS}]")
 
     @staticmethod
     def _job(row) -> DurableJob:
