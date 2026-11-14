@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "postgres-engineering-lab"
-version = "1.0.0"
+version = "1.1.0"
 description = "PostgreSQL migrations, transactional ledger, durable jobs and plan regression toolkit"
 requires-python = ">=3.11"
 dependencies = ["psycopg[binary]>=3.2"]
