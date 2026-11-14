@@ -31,6 +31,12 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest -q
+      - name: Audit secure PostgreSQL transport configuration
+        run: |
+          mkdir -p evidence
+          CA_FILE="$(python -c 'import pathlib, ssl; print(pathlib.Path(ssl.get_default_verify_paths().cafile).resolve())')"
+          db-bench --dsn "host=db.internal,db-replica.internal port=5432,5432 dbname=ledger user=app sslmode=verify-full sslrootcert=${CA_FILE} ssl_min_protocol_version=TLSv1.2 channel_binding=require connect_timeout=5 target_session_attrs=read-write application_name=db-bench-ci" audit-transport > evidence/transport-audit.json
+          python -m json.tool evidence/transport-audit.json >/dev/null
       - name: Verify migrations, ledger, leases and keyset pagination
         run: |
           mkdir -p evidence

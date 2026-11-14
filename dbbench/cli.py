@@ -7,6 +7,7 @@ from pathlib import Path
 
 from dbbench.migrations import MigrationRunner
 from dbbench.scenarios import print_report, verify_platform
+from dbbench.transport import TransportConfigError, audit_postgres_transport
 from dbbench.workload import (
     benchmark_query,
     connect,
@@ -86,6 +87,16 @@ def command_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_audit_transport(args: argparse.Namespace) -> int:
+    try:
+        audit = audit_postgres_transport(args.dsn)
+    except TransportConfigError as exc:
+        print(json.dumps({"passed": False, "error": str(exc)}, indent=2))
+        return 2
+    print(json.dumps(audit.as_dict(), indent=2))
+    return 0 if audit.passed else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="db-bench",
@@ -113,6 +124,12 @@ def build_parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser("verify")
     verify.add_argument("--seed-rows", type=int, default=3000)
     verify.set_defaults(handler=command_verify)
+
+    audit_transport = subparsers.add_parser(
+        "audit-transport",
+        help="audit PostgreSQL TLS and credential transport settings without connecting",
+    )
+    audit_transport.set_defaults(handler=command_audit_transport)
     return parser
 
 

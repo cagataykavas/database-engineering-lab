@@ -2,7 +2,7 @@
 
 A runnable PostgreSQL system for studying the two things a production data layer must get right: **correctness under concurrency** and **performance under evidence**.
 
-The repository implements checksum-verified migrations, an idempotent double-entry transfer ledger, deterministic row locking, a durable `SKIP LOCKED` worker queue, compound keyset pagination, synthetic workload generation and machine-readable `EXPLAIN (ANALYZE, BUFFERS)` regression reports.
+The repository implements checksum-verified migrations, an idempotent double-entry transfer ledger, deterministic row locking, a durable `SKIP LOCKED` worker queue, compound keyset pagination, PostgreSQL transport admission, synthetic workload generation and machine-readable `EXPLAIN (ANALYZE, BUFFERS)` regression reports.
 
 It is deliberately more than a folder of SQL snippets. The CLI executes the complete system against PostgreSQL 16 and CI publishes the resulting ledger, lease, pagination and query-plan evidence.
 
@@ -38,6 +38,31 @@ flowchart TD
 | Poison job retries forever | Attempt budget, delayed retry and `dead_letter` state |
 | Offset pagination skips/duplicates rows | `(created_at, id)` keyset cursor |
 | Query regression goes unnoticed | Parsed execution, scan and buffer budgets |
+| DSN silently weakens server authentication | Offline fail-closed transport policy audit |
+| Database credentials leak into process arguments or evidence | Inline-secret rejection and redacted output |
+
+## PostgreSQL transport admission
+
+`audit-transport` checks production connection configuration without opening a socket. It requires
+`verify-full`, an explicit valid CA bundle, TLS 1.2 or newer, channel binding, a bounded connection
+timeout, a read-write target, and an application name. Multi-host port arity is checked, private
+credential files must use absolute nonsymlink paths without group/other access, and passwords in
+the DSN are rejected. Output contains only policy and CA digests, endpoint count, negotiated policy
+settings, and findings—never hostnames, usernames, passwords, or file paths.
+
+```bash
+db-bench --dsn "host=db.internal,db-replica.internal \
+port=5432,5432 dbname=ledger user=app \
+sslmode=verify-full sslrootcert=/etc/db/ca.pem \
+ssl_min_protocol_version=TLSv1.2 channel_binding=require \
+connect_timeout=5 target_session_attrs=read-write \
+application_name=db-bench" audit-transport
+```
+
+The command exits `0` when policy passes, `1` for an interpretable but unsafe configuration, and
+`2` when the connection configuration cannot be parsed safely. It validates intent and local trust
+material; it does not prove remote reachability, certificate rotation, DNS integrity, firewall
+policy, or the server's live TLS behavior.
 
 ## Versioned migrations
 
@@ -156,6 +181,7 @@ The command exits non-zero if any computed invariant is false.
 
 ```text
 db-bench migrate
+db-bench --dsn "$DATABASE_URL" audit-transport
 db-bench verify --seed-rows 3000
 db-bench init --seed-rows 100000
 db-bench benchmark --iterations 20 --output benchmark.json
@@ -169,6 +195,7 @@ GitHub Actions provisions PostgreSQL 16 and runs:
 
 - Ruff lint and formatting verification;
 - unit tests for migration discovery, cursor validation and plan budgets;
+- an offline secure-transport audit with the runner's real CA bundle;
 - the complete transaction/lease/pagination verification;
 - the query-plan benchmark;
 - JSON artifact upload;
@@ -189,6 +216,7 @@ dbbench/
 ├── pagination.py   compound seek cursor
 ├── plans.py        EXPLAIN tree and plan budgets
 ├── scenarios.py    real PostgreSQL evidence run
+├── transport.py    fail-closed TLS and credential policy audit
 ├── workload.py     deterministic seeding and timing
 └── sql/             packaged versioned migrations
 tests/               fast deterministic regression tests
